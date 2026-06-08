@@ -1,4 +1,4 @@
-# BÀI TẬP LỚN - BÀI 5
+
 **Môn:** Phát triển ứng dụng với Mã nguồn mở - TEE0421  
 **Sinh viên:** Nguyễn Tiến Đức  
 **Repo:** Tài liệu + source code BT5 - Docker Monitor & Alert
@@ -254,57 +254,487 @@ curl http://localhost:80                # Nginx frontend
 
 ---
 
-## Phần II – Thực hành: APP Monitor & Alert giá vàng
-
-> 🔨 *Đang thực hiện — sẽ cập nhật kèm ảnh chụp từng bước*
-
-### Kiến trúc hệ thống
-
-```
-[API giá vàng]
-      │
-      ▼
-  [Node-RED]  ──────────────────────────────────┐
-      │                                          │
-      ├──► [MariaDB]  (giá trị tức thời)         │
-      │         │                                │
-      │         ▼                                │
-      │    [Flask API] ◄── AJAX ──[Nginx/Web]    │
-      │                                          │
-      └──► [InfluxDB] (lịch sử)                  │
-                │                                │
-                ▼                                │
-           [Grafana] ◄── iframe ── [Nginx/Web] ──┘
-                                          │
-                              [Alert] ──► [Telegram Bot]
-```
-
-### Cấu trúc thư mục dự án
-
-```
-baitap5/
-├── docker-compose.yml
-├── nginx.conf
-├── html/               # Frontend (HTML + JS + CSS)
-│   └── index.html
-├── api/                # Flask API
-│   ├── Dockerfile
-│   └── app.py
-├── nodered/            # Node-RED data (flows)
-└── README.md           # File này
-```
-
-### Các service trong docker-compose.yml
-
-| Service | Image | Cổng | Vai trò |
-|---|---|---|---|
-| `nodered` | `nodered/node-red` | (nội bộ) | Lấy giá vàng, lưu DB, gửi alert |
-| `mariadb` | `mariadb:10.6` | (nội bộ) | Lưu giá trị tức thời |
-| `influxdb` | `influxdb:2.7` | (nội bộ) | Lưu lịch sử giá vàng |
-| `flask_api` | `python:3.11` | (nội bộ) | API trả dữ liệu tức thời cho web |
-| `grafana` | `grafana/grafana` | (nội bộ) | Vẽ biểu đồ lịch sử |
-| `nginx` | `nginx:alpine` | `80:80` | Web server, proxy tất cả service |
+## PHẦN II — THỰC HÀNH: APP MONITOR + ALERT GIÁ VÀNG REALTIME
 
 ---
 
-*Cập nhật lần cuối: 06/2026*
+## Kiến trúc hệ thống
+
+```
+[API Giá Vàng SJC]
+        │
+        ▼
+  [Node-RED]  ──────────────────────────────► [Telegram Bot]
+        │                                        (Alert khi bất thường)
+        ├──► [MariaDB]  ──► [Flask API] ──► [Nginx] :80
+        └──► [InfluxDB] ──► [Grafana]  ──► [Nginx] /grafana
+                                               │
+                                          [Frontend HTML]
+                                     giavang.nguyentienduc04.io.vn
+```
+
+### Danh sách service trong docker-compose.yml
+
+| Service | Image | Vai trò |
+|---|---|---|
+| nodered | nodered/node-red | Lấy giá vàng, lưu DB, gửi Telegram |
+| mariadb | mariadb:10.6 | Lưu giá trị tức thời |
+| influxdb | influxdb:2.7 | Lưu lịch sử dữ liệu |
+| flask_api | baitap5-flask_api | API trả dữ liệu từ MariaDB |
+| grafana | grafana/grafana | Vẽ biểu đồ lịch sử |
+| nginx | nginx:alpine | Web server, proxy |
+
+---
+
+## Các bước thực hiện
+
+### Bước 1 — Tạo cấu trúc thư mục
+
+```bash
+mkdir ~/baitap5
+cd ~/baitap5
+mkdir html api nodered
+sudo chown -R 1000:1000 ~/baitap5/nodered
+```
+<img width="1484" height="711" alt="image" src="https://github.com/user-attachments/assets/51bfd8da-9038-4c4d-9caf-14d784304463" />
+
+
+---
+
+### Bước 2 — Tạo file docker-compose.yml
+
+```bash
+nano docker-compose.yml
+```
+
+Nội dung file:
+
+```yaml
+services:
+
+  nodered:
+    image: nodered/node-red:latest
+    container_name: nodered
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "1880:1880"
+    volumes:
+      - ./nodered:/data
+    networks:
+      - backend
+
+  mariadb:
+    image: mariadb:10.6
+    container_name: mariadb
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_DATABASE=golddb
+      - MYSQL_USER=golduser
+      - MYSQL_PASSWORD=goldpass
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - backend
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    restart: unless-stopped
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpass123
+      - DOCKER_INFLUXDB_INIT_ORG=myorg
+      - DOCKER_INFLUXDB_INIT_BUCKET=gold_history
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=mytoken123456
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    networks:
+      - backend
+
+  flask_api:
+    build: ./api
+    container_name: flask_api
+    restart: unless-stopped
+    environment:
+      - DB_HOST=mariadb
+      - DB_NAME=golddb
+      - DB_USER=golduser
+      - DB_PASS=goldpass
+    depends_on:
+      - mariadb
+    networks:
+      - backend
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_SERVER_ROOT_URL=http://localhost/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - flask_api
+      - grafana
+      - nodered
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  mariadb_data:
+  influxdb_data:
+  grafana_data:
+```
+
+<img width="1919" height="1021" alt="image" src="https://github.com/user-attachments/assets/ef515983-b989-488a-a5bf-4862c2de38b3" />
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/20f5341d-6443-4ad9-af66-860b5c82937a" />
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/d846571f-5682-45cb-be72-b2941de4432c" />
+
+
+---
+
+### Bước 3 — Tạo Flask API
+
+**api/Dockerfile:**
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
+CMD ["python", "app.py"]
+```
+
+**api/requirements.txt:**
+```
+flask
+flask-cors
+pymysql
+```
+
+**api/app.py** — API trả về giá vàng tức thời từ MariaDB:
+```python
+from flask import Flask, jsonify
+from flask_cors import CORS
+import pymysql, os
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route('/api/gold', methods=['GET'])
+def get_gold():
+    try:
+        db = pymysql.connect(
+            host=os.environ.get('DB_HOST', 'mariadb'),
+            user=os.environ.get('DB_USER', 'golduser'),
+            password=os.environ.get('DB_PASS', 'goldpass'),
+            database=os.environ.get('DB_NAME', 'golddb'),
+            charset='utf8mb4'
+        )
+        cursor = db.cursor()
+        cursor.execute("SELECT gia_mua, gia_ban, thoi_gian FROM gold_price ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        db.close()
+        if row:
+            return jsonify({"gia_mua": row[0], "gia_ban": row[1],
+                           "thoi_gian": str(row[2]), "status": "ok"})
+        return jsonify({"status": "no_data"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
+```
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/2ea22213-b78a-4598-9e3e-410a1540a812" />
+
+
+---
+
+### Bước 4 — Khởi động hệ thống
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+<img width="1481" height="716" alt="image" src="https://github.com/user-attachments/assets/4cf22f1c-3169-4dc2-bd33-7caf451f6a1f" />
+
+
+---
+
+### Bước 5 — Tạo bảng trong MariaDB
+
+```bash
+docker compose exec mariadb mariadb -ugolduser -pgoldpass golddb -e "
+CREATE TABLE IF NOT EXISTS gold_price (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  gia_mua BIGINT,
+  gia_ban BIGINT,
+  thoi_gian DATETIME DEFAULT CURRENT_TIMESTAMP
+);"
+```
+
+<img width="1478" height="706" alt="image" src="https://github.com/user-attachments/assets/bd9ecdca-2b15-49c5-8925-f14875e5978d" />
+
+
+---
+
+### Bước 6 — Cấu hình Node-RED
+
+Truy cập: `[http://<IP>:1880](http://172.19.193.244:1880)`
+
+**6.1 Cài các node cần thiết:**
+
+Menu (☰) → Manage palette → Install:
+- `node-red-node-mysql`
+- `node-red-contrib-influxdb`
+- `node-red-contrib-telegrambot`
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/90178459-77cb-4127-881c-c0982f841c5e" />
+
+
+
+**6.2 Import flow:**
+
+Menu (☰) → Import → paste JSON flow → Import
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/dc39b663-8a90-44d8-bc6e-38126e326c2c" />
+
+
+**6.3 Cấu hình node Lưu MariaDB:**
+
+Double-click → điền User: `golduser`, Password: `goldpass`
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/c9a8a952-9c13-48aa-90db-2841eec2a3bd" />
+
+
+**6.4 Cấu hình node Lưu InfluxDB:**
+
+Double-click → URL: `http://influxdb:8086`, Token: `mytoken123456`, Org: `myorg`, Bucket: `gold_history`
+
+<img width="1917" height="1079" alt="image" src="https://github.com/user-attachments/assets/6fba9a87-f266-4af7-b0d8-8ee2251944f2" />
+
+**6.5 Cấu hình Telegram bot:**
+
+Double-click node Gửi Telegram → điền Token bot, ChatIds: `-5088493997`
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/421d7d85-4404-49d3-b34b-ff6203dd6a57" />
+
+
+**6.6 Deploy và kiểm tra:**
+
+Nhấn Deploy → node Lưu MariaDB hiển thị "OK"
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/ffeaa228-4426-40df-8f56-1c182c156b1f" />
+
+
+---
+
+### Bước 7 — Kiểm tra dữ liệu vào MariaDB
+
+```bash
+docker compose exec mariadb mariadb -ugolduser -pgoldpass golddb \
+  -e "SELECT * FROM gold_price ORDER BY id DESC LIMIT 5;"
+```
+
+<img width="1483" height="712" alt="image" src="https://github.com/user-attachments/assets/8dbf1096-9ad9-405b-b106-95ad41739d8c" />
+
+
+---
+
+### Bước 8 — Cấu hình Grafana
+
+Truy cập: `http://172.19.193.244:3000` 
+
+**8.1 Thêm InfluxDB data source:**
+
+Connections → Data sources → Add → InfluxDB
+
+- Query language: **Flux**
+- URL: `http://influxdb:8086`
+- Token: `mytoken123456`
+- Org: `myorg`
+- Bucket: `gold_history`
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/70962f39-7e16-43d6-b2c0-cc00f83c4533" />
+
+
+**8.2 Tạo dashboard:**
+
+New dashboard → Add visualization → paste query Flux:
+
+```flux
+from(bucket: "gold_history")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "gold_price")
+  |> filter(fn: (r) => r._field == "gia_mua" or r._field == "gia_ban")
+```
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/9719cafb-fdb1-4a67-ba01-069324cf19d9" />
+
+
+
+**8.3 Bật public dashboard:**
+
+```bash
+curl -s -X POST -u admin:admin123 \
+  -H "Content-Type: application/json" \
+  -d '{"isEnabled":true}' \
+  "http://localhost:3000/api/dashboards/uid/<UID>/public-dashboards"
+```
+
+<img width="1477" height="707" alt="image" src="https://github.com/user-attachments/assets/edc59a44-3c19-4678-a82f-5697bb75296b" />
+
+
+---
+
+
+### Bước 9 — Kết quả giao diện web
+
+Truy cập: ` https://giavang.nguyentienduc04.io.vn`
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/02b4a3be-9fa5-46a9-9e9b-db16a8418b99" />
+
+> - Header "Monitor Giá Vàng Thời Gian Thực"
+> - Card Giá Mua + Giá Bán hiển thị số
+> - Alert đỏ khi giá bất thường
+> - Iframe Grafana hiển thị biểu đồ lịch sử
+
+---
+
+### Bước 10 — Test Alert Telegram
+
+Tạm thời đặt ngưỡng LOW = 12,000,000 để trigger alert → Deploy → chờ 30 giây
+
+<img width="1290" height="2796" alt="image" src="https://github.com/user-attachments/assets/4e8b6841-d503-4745-8d77-8b050abbcb42" />
+
+
+---
+
+### Bước 11 — Xuất và load lại Docker images
+
+**11.1 Dừng hệ thống và xuất images:**
+
+```bash
+docker compose down
+
+docker save nodered/node-red mariadb:10.6 influxdb:2.7 \
+  grafana/grafana nginx:alpine baitap5-flask_api \
+  | gzip > ~/baitap5_images.tar.gz
+
+ls -lh ~/baitap5_images.tar.gz
+```
+
+<img width="1479" height="712" alt="image" src="https://github.com/user-attachments/assets/eb8abc03-183a-4128-b440-01dd2a2505db" />
+
+
+**11.2 Xóa các images:**
+
+```bash
+docker rmi nodered/node-red mariadb:10.6 influxdb:2.7 \
+  grafana/grafana nginx:alpine baitap5-flask_api
+
+docker images
+```
+
+<img width="1512" height="796" alt="image" src="https://github.com/user-attachments/assets/6d2e6215-7cf9-4830-8a9c-80e383eab4e9" />
+<img width="1512" height="801" alt="image" src="https://github.com/user-attachments/assets/605faa09-10b8-4355-8b57-e01a3d1cc231" />
+
+
+**11.3 Load lại từ file nén:**
+
+```bash
+docker load < ~/baitap5_images.tar.gz
+```
+
+<img width="1512" height="801" alt="image" src="https://github.com/user-attachments/assets/8d470e1c-3661-462a-adeb-8621ba823735" />
+
+
+**11.4 Khởi động lại và kiểm tra:**
+
+```bash
+docker compose up -d
+docker compose ps
+```
+<img width="1479" height="710" alt="image" src="https://github.com/user-attachments/assets/cd124b96-1091-4df3-b5b3-6e678167096a" />
+
+
+---
+
+### Bước 12 — Tên miền với Cloudflare Tunnel
+
+**12.1 Tạo tunnel trên Cloudflare Zero Trust:**
+
+Vào `dash.cloudflare.com` → Zero Trust → Networks → Connectors → Create a tunnel
+
+Tên tunnel: `baitap5-tunnel`
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/34becb79-ceb9-4612-b85e-f639ac4ab4fa" />
+
+
+
+**12.2 Chạy cloudflared trên Ubuntu:**
+
+```bash
+docker run -d --name cloudflared \
+  --restart unless-stopped \
+  cloudflare/cloudflared:latest \
+  tunnel --no-autoupdate run \
+  --token <TOKEN>
+```
+
+**12.3 Cấu hình Route:**
+
+- Subdomain: `giavang`
+- Domain: `nguyentienduc04.io.vn`
+- Service Type: `HTTP`
+- URL: `172.19.193.244:80`
+
+
+
+**12.4 Kết quả:**
+
+Truy cập `https://giavang.nguyentienduc04.io.vn` từ bất kỳ thiết bị nào có internet
+
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/fddcfa91-ea00-4b53-88b4-d80cf9674312" />
+
+
+---
+
+## Tổng kết
+
+| Thành phần | Trạng thái | URL/Ghi chú |
+|---|---|---|
+| Web frontend |   https://giavang.nguyentienduc04.io.vn |
+| API giá vàng |   /api/gold |
+| Grafana dashboard |  /grafana |
+| Node-RED flow |  Cập nhật 30 giây/lần |
+| Alert Telegram |  Bot: @giavang_alert_k58_bot |
+| docker save/load |  baitap5_images.tar.gz (852MB) |
+| Tên miền HTTPS |  Cloudflare Tunnel |
